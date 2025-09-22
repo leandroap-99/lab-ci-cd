@@ -31,18 +31,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set TAG_APP with SHA
-        run: |
-          echo "TAG_APP=v${{ env.APP_VERSION }}-$(echo $GITHUB_SHA | cut -c1-7)" >> "$GITHUB_ENV"
-
-      - name: Set TAG_APP Output
+      - name: Set TAG_APP and output
         id: set_tag
-        run: echo "image_tag=$TAG_APP" >> $GITHUB_OUTPUT
+        run: |
+          TAG_APP="v${{ env.APP_VERSION }}-$(echo $GITHUB_SHA | cut -c1-7)"
+          echo "TAG_APP=$TAG_APP" >> "$GITHUB_ENV"
+          echo "image_tag=$TAG_APP" >> "$GITHUB_OUTPUT"
 
       - name: Show image TAG
         run: |
-          echo "Image TAG" $TAG_APP
-          echo "Image TAG" ${{ steps.set_tag.outputs.image_tag }}
+          echo "Image TAG: $TAG_APP"
+          echo "Image TAG from output: ${{ steps.set_tag.outputs.image_tag }}"
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -50,10 +49,10 @@ jobs:
           python-version: '3.10'
 
       - name: Install Requirements
-        run:  pip install flask
+        run: pip install flask
 
       - name: Unit Test
-        run: python -m unittest -v test
+        run: python -m unittest -v test.py
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -65,12 +64,12 @@ jobs:
         env:
           DOCKER_BUILDKIT: 1
         run: |
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.TAG_APP }} .
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.set_tag.outputs.image_tag }} .
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.TAG_APP }}'
+          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.set_tag.outputs.image_tag }}'
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
@@ -79,13 +78,12 @@ jobs:
 
       - name: Push image
         run: |
-          docker image push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.TAG_APP }}
+          docker image push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.set_tag.outputs.image_tag }}
 
   Deploy:
     name: 'Deploy App'
     runs-on: ubuntu-latest
     needs: Build
-
     defaults:
       run:
         shell: bash
@@ -109,7 +107,7 @@ jobs:
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ./app/deploy/ecs-task-definition.json
+          task-definition: ./deploy/ecs-task-definition.json
           container-name: ${{ env.IMAGE_NAME }}
           image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.Build.outputs.image_tag }}
           taskRoleArn: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/LabRole
@@ -128,37 +126,37 @@ jobs:
 
       - name: Terraform | Set up statefile S3 Bucket for Backend
         run: |
-            echo "terraform {
-              backend \"s3\" {
-                bucket   = \"${{ secrets.AWS_ACCOUNT_ID }}-tfstate\"
-                key      = \"app-${{ env.ENVIRONMENT }}.tfstate\"
-                region   = \"${{ vars.AWS_REGION }}\"
-              }
-            }" >> provider.tf
-            cat provider.tf
-        working-directory: ./app/deploy
+          echo "terraform {
+            backend \"s3\" {
+              bucket   = \"${{ secrets.AWS_ACCOUNT_ID }}-tfstate\"
+              key      = \"app-${{ env.ENVIRONMENT }}.tfstate\"
+              region   = \"${{ vars.AWS_REGION }}\"
+            }
+          }" >> provider.tf
+          cat provider.tf
+        working-directory: deploy
 
       - name: Terraform | Initialize backend
         run: terraform init
-        working-directory: ./app/deploy
+        working-directory: deploy
 
       - name: Terraform | Check Syntax IaC Code
         run: terraform validate
-        working-directory: ./app/deploy
+        working-directory: deploy
 
       - name: Terraform | Plan
         run: terraform plan -out tfplan.binary
-        working-directory: ./app/deploy
+        working-directory: deploy
 
       - name: Terraform Destroy
         if: env.DESTROY == 'true'
         run: terraform destroy -auto-approve -input=false
-        working-directory: ./app/deploy
+        working-directory: deploy
 
       - name: Terraform Creating and Update
         if: env.DESTROY != 'true'
         run: terraform apply -auto-approve -input=false
-        working-directory: ./app/deploy
+        working-directory: deploy
 
       - name: Deploy App in Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
